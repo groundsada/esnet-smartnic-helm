@@ -1,0 +1,74 @@
+{{- if .Values.flash.enabled }}
+{{- $dev := .Values.fpga.pcieDev }}
+# compose: smartnic-flash-rescue (JTAG). Writes the .mcs user partition (golden at 0x0 untouched),
+# then boot_hw_device + PCIe rescan of this card only. The Deployment is scaled to 0 meanwhile
+# because hw_server needs the JTAG cable to itself.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-flash
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: {kubernetes.io/hostname: {{ .Values.node }}}
+      tolerations:
+      - {key: nautilus.io/kured-node-reboot, operator: Exists, effect: PreferNoSchedule}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+      - name: unpack
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        command: [/bin/bash, /stack/unpack.sh]
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: bitfiles, mountPath: /bitfiles}
+        - {name: stack-scripts, mountPath: /stack}
+      - name: hwserver
+        image: {{ .Values.images.labtools }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        restartPolicy: Always
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        args:
+        - /bin/bash
+        - -c
+        - exec hw_server -S -s tcp::3121 -e "set auto-open-ports 0" -e "set jtag-port-filter {{ .Values.fpga.jtagSerial }}"
+        startupProbe:
+          tcpSocket: {port: 3121}
+          periodSeconds: 5
+          failureThreshold: 24
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: dev, mountPath: /dev}
+        - {name: sys-usb, mountPath: /sys/bus/usb}
+      containers:
+      - name: flash
+        image: {{ .Values.images.labtools }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        args:
+        - /bin/bash
+        - -c
+        - |
+          set -e -o pipefail -x
+          [ -e /bitfiles/ok ]
+          /scripts/program_flash.sh localhost:3121 "{{ .Values.fpga.jtagSerial }}" /bitfiles/esnet-smartnic.mcs {{ $dev }}
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "2", memory: 4Gi}
+        volumeMounts:
+        - {name: bitfiles, mountPath: /bitfiles, readOnly: true}
+        - {name: hw-scripts, mountPath: /scripts}
+      volumes:
+      - {name: bitfiles, emptyDir: {}}
+      - {name: dev, hostPath: {path: /dev}}
+      - {name: sys-usb, hostPath: {path: /sys/bus/usb}}
+      - name: hw-scripts
+        configMap: {name: {{ .Release.Name }}-hw-scripts, defaultMode: 0755}
+      - name: stack-scripts
+        configMap: {name: {{ .Release.Name }}-stack-scripts, defaultMode: 0755}
+{{- end }}

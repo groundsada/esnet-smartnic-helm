@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-hw-scripts
+data:
+{{ (.Files.Glob "files/smartnic-hw/*").AsConfig | indent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-stack-scripts
+data:
+{{ (.Files.Glob "files/stack/*").AsConfig | indent 2 }}
+---
+{{- $old := lookup "v1" "Secret" .Release.Namespace (printf "%s-auth" .Release.Name) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-auth
+type: Opaque
+data:
+  {{- if $old }}
+  cfg: {{ index $old.data "cfg" }}
+  p4: {{ index $old.data "p4" }}
+  {{- else }}
+  cfg: {{ .Values.auth.cfgToken | default (randAlphaNum 32) | b64enc }}
+  p4: {{ .Values.auth.p4Token | default (randAlphaNum 32) | b64enc }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-vfio-unlock
+data:
+{{ (.Files.Glob "files/vfio-unlock/*").AsConfig | indent 2 }}

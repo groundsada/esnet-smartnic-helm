@@ -1,0 +1,54 @@
+# Ubuntu 24.04 VM on node-2-11 that runs the stock sn-stack docker compose unchanged.
+# Apply the cloud-init Secret first: ./mk-cloudinit.sh | kubectl -n esnet-fpga-experiments apply -f -
+#
+# Host prerequisites (not done by this file):
+#  - Both PFs of ONE card bound to vfio-pci on the host (the helm chart's devbind init does this),
+#    otherwise virt-handler advertises esnet.com/alveo_u55c_f1/f2 = 0 and the VMI stays Pending.
+#    Bind only the card you want: KubeVirt picks any free 903f/913f, it cannot select by BDF.
+#  - xilinx.com/fpga_jtag selects by vendor:product only (0403:6011), so with two cards on the
+#    node the VM may get either cable. Check `lsusb -v -d 0403:6011 | grep iSerial` inside.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: sn-vm
+spec:
+  runStrategy: Halted
+  dataVolumeTemplates:
+  # Imported once into a PVC; later starts boot from the PVC (no image pull, no cloud-init growpart wait).
+  - metadata: {name: sn-vm-root}
+    spec:
+      source:
+        registry: {url: "docker://quay.io/containerdisks/ubuntu:24.04"}
+      storage:
+        storageClassName: ceph-rbd
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 40Gi}}
+  template:
+    metadata:
+      labels: {app: sn-vm}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: node-2-11.sdsc.optiputer.net}
+      domain:
+        cpu: {cores: 8, model: host-passthrough}
+        memory: {guest: 16Gi}
+        resources:
+          requests: {cpu: "8", memory: 16Gi}
+          limits: {cpu: "8", memory: 16Gi}
+        devices:
+          disks:
+          - {name: root, disk: {bus: virtio}}
+          - {name: cloudinit, disk: {bus: virtio}}
+          interfaces:
+          - {name: default, masquerade: {}}
+          hostDevices:
+          - {name: u55c-pf0, deviceName: esnet.com/alveo_u55c_f1}
+          - {name: u55c-pf1, deviceName: esnet.com/alveo_u55c_f2}
+          - {name: jtag, deviceName: xilinx.com/fpga_jtag}
+      networks:
+      - {name: default, pod: {}}
+      volumes:
+      - name: root
+        dataVolume: {name: sn-vm-root}
+      - name: cloudinit
+        cloudInitNoCloud:
+          secretRef: {name: sn-vm-cloudinit}

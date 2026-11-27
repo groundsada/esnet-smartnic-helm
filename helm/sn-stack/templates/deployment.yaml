@@ -1,0 +1,198 @@
+{{- $dev := .Values.fpga.pcieDev }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {app: {{ .Release.Name }}}
+spec:
+  replicas: {{ if .Values.flash.enabled }}0{{ else }}1{{ end }}
+  # Never two pods on one card, not even during a rollout.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}}
+      annotations:
+        checksum/scripts: {{ (.Files.Glob "files/**").AsConfig | sha256sum | trunc 16 }}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: {{ .Values.node }}}
+      tolerations:
+      - {key: nautilus.io/kured-node-reboot, operator: Exists, effect: PreferNoSchedule}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      initContainers:
+      # compose: smartnic-unpack
+      - name: unpack
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        command: [/bin/bash, /stack/unpack.sh]
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: bitfiles, mountPath: /bitfiles}
+        - {name: stack-scripts, mountPath: /stack}
+      {{- if .Values.program.enabled }}
+      # compose: xilinx-hwserver (native sidecar; reachable on localhost:3121)
+      - name: hwserver
+        image: {{ .Values.images.labtools }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        restartPolicy: Always
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        # args, not command: the image's /entrypoint.sh sources Vivado_Lab settings64.sh (PATH).
+        args:
+        - /bin/bash
+        - -c
+        - exec hw_server -S -s tcp::3121 -e "set auto-open-ports 0" -e "set jtag-port-filter {{ .Values.fpga.jtagSerial }}"
+        startupProbe:
+          tcpSocket: {port: 3121}
+          periodSeconds: 5
+          failureThreshold: 24
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: dev, mountPath: /dev}
+        - {name: sys-usb, mountPath: /sys/bus/usb}
+      # compose: smartnic-hw (JTAG-load the .bit; volatile)
+      - name: program
+        image: {{ .Values.images.labtools }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        args:
+        - /bin/bash
+        - -c
+        - |
+          set -e -o pipefail -x
+          [ -e /bitfiles/ok ]
+          /scripts/program_card.sh localhost:3121 "{{ .Values.fpga.jtagSerial }}" \
+            /bitfiles/esnet-smartnic.bit {{ if .Values.program.vioPcieReset }}/bitfiles/debug_nets.ltx{{ else }}/nonexistent.ltx{{ end }} {{ $dev }} {{ if .Values.program.force }}FORCE{{ end }}
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: bitfiles, mountPath: /bitfiles, readOnly: true}
+        - {name: hw-scripts, mountPath: /scripts}
+      {{- end }}
+      # compose: smartnic-devbind / smartnic-devunbind
+      - name: {{ ternary "devunbind" "devbind" (eq .Values.pfMode "none") }}
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        command: [/bin/bash, /stack/{{ ternary "devunbind" "devbind" (eq .Values.pfMode "none") }}.sh]
+        env: {{- include "sn-stack.fwEnv" . | nindent 8 }}
+        {{- include "sn-stack.small" . | nindent 8 }}
+        {{- include "sn-stack.hostdev" . | nindent 8 }}
+      {{- if eq .Values.pfMode "vfio" }}
+      # compose: smartnic-vfio-unlock. vfio-pci parks an unopened device in D3hot (BAR reads
+      # return 0xffffffff); holding the vfio group open keeps it in D0 so sn-cfg/regio can mmap BAR2.
+      # Holds the group exclusively: DPDK on the same PFs needs this sidecar off (pfMode: vfio-dpdk).
+      - name: vfio-unlock
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        restartPolicy: Always
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        command: [python3, -u, /scripts/vfio-unlock.py, --pf={{ $dev }}.0, --pf={{ $dev }}.1, --bar=2]
+        startupProbe:
+          exec: {command: [grep, -qx, D0, /sys/bus/pci/devices/{{ $dev }}.0/power_state]}
+          periodSeconds: 2
+          failureThreshold: 30
+        {{- include "sn-stack.small" . | nindent 8 }}
+        volumeMounts:
+        - {name: sys-pci, mountPath: /sys/bus/pci}
+        - {name: dev, mountPath: /dev}
+        - {name: vfio-unlock, mountPath: /scripts}
+      {{- end }}
+      containers:
+      # compose: smartnic-cfg
+      - name: cfg
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        command: [/usr/local/sbin/sn-cfg-server-entrypoint.sh]
+        env:
+        {{- include "sn-stack.fwEnv" . | nindent 8 }}
+        - {name: SN_CFG_SERVER_DEVICES, value: "{{ $dev }}.0"}
+        - name: SN_CFG_SERVER_AUTH_TOKENS
+          valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: cfg}}
+        ports: [{name: cfg, containerPort: 50100}]
+        readinessProbe:
+          exec: {command: [grpc_health_probe, -tls, -tls-no-verify, "-addr", "[::]:50100"]}
+          periodSeconds: 10
+        {{- include "sn-stack.server" . | nindent 8 }}
+        {{- include "sn-stack.hostdev" . | nindent 8 }}
+      {{- if .Values.p4.enabled }}
+      # compose: smartnic-p4
+      - name: p4
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        command: [/usr/local/sbin/sn-p4-server-entrypoint.sh]
+        env:
+        {{- include "sn-stack.fwEnv" . | nindent 8 }}
+        - {name: SN_P4_SERVER_DEVICES, value: "{{ $dev }}.0"}
+        - name: SN_P4_SERVER_AUTH_TOKENS
+          valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: p4}}
+        ports: [{name: p4, containerPort: 50050}]
+        readinessProbe:
+          exec: {command: [grpc_health_probe, -tls, -tls-no-verify, "-addr", "[::]:50050"]}
+          periodSeconds: 10
+        {{- include "sn-stack.server" . | nindent 8 }}
+        {{- include "sn-stack.hostdev" . | nindent 8 }}
+      {{- end }}
+      # compose: smartnic-fw (+ smartnic-dpdk): the shell you exec into for sn-cli, regio, dpdk/pktgen
+      - name: fw
+        image: {{ .Values.images.fw }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{- include "sn-stack.priv" . | nindent 8 }}
+        command: [sleep, infinity]
+        env:
+        {{- include "sn-stack.fwEnv" . | nindent 8 }}
+        - {name: SN_CFG_CLI_ADDRESS, value: localhost}
+        - {name: SN_CFG_CLI_TLS_INSECURE, value: "true"}
+        - name: SN_CFG_CLI_AUTH_TOKEN
+          valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: cfg}}
+        - {name: SN_P4_CLI_ADDRESS, value: localhost}
+        - {name: SN_P4_CLI_TLS_INSECURE, value: "true"}
+        - name: SN_P4_CLI_AUTH_TOKEN
+          valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: p4}}
+        resources:
+          requests:
+            {{- toYaml .Values.resources.tools | nindent 12 }}
+            {{- if .Values.dpdk.enabled }}
+            hugepages-1Gi: {{ .Values.dpdk.hugepages1Gi }}
+            {{- end }}
+          limits:
+            {{- toYaml .Values.resources.tools | nindent 12 }}
+            {{- if .Values.dpdk.enabled }}
+            hugepages-1Gi: {{ .Values.dpdk.hugepages1Gi }}
+            {{- end }}
+        volumeMounts:
+        - {name: dev, mountPath: /dev}
+        - {name: sys-pci, mountPath: /sys/bus/pci}
+        - {name: modules, mountPath: /lib/modules, readOnly: true}
+        - {name: bitfiles, mountPath: /bitfiles, readOnly: true}
+        - {name: scratch, mountPath: /scratch}
+        {{- if .Values.dpdk.enabled }}
+        - {name: hugepages, mountPath: /dev/hugepages}
+        - {name: sys-node, mountPath: /sys/devices/system/node}
+        {{- end }}
+      volumes:
+      - {name: bitfiles, emptyDir: {}}
+      - {name: scratch, emptyDir: {}}
+      - {name: dev, hostPath: {path: /dev}}
+      - {name: sys-pci, hostPath: {path: /sys/bus/pci}}
+      - {name: sys-usb, hostPath: {path: /sys/bus/usb}}
+      - {name: sys-node, hostPath: {path: /sys/devices/system/node}}
+      - {name: modules, hostPath: {path: /lib/modules}}
+      - {name: hugepages, emptyDir: {medium: HugePages-1Gi}}
+      - name: hw-scripts
+        configMap: {name: {{ .Release.Name }}-hw-scripts, defaultMode: 0755}
+      - name: stack-scripts
+        configMap: {name: {{ .Release.Name }}-stack-scripts, defaultMode: 0755}
+      - name: vfio-unlock
+        configMap:
+          name: {{ .Release.Name }}-vfio-unlock
+          items:
+          - {key: vfio-unlock.py, path: vfio-unlock.py}
+          - {key: vfio.py, path: vfio/vfio.py}
+          - {key: vfio_init.py, path: vfio/__init__.py}
+          - {key: ioctl_util.py, path: ioctl_util/ioctl_util.py}
+          - {key: ioctl_util_init.py, path: ioctl_util/__init__.py}

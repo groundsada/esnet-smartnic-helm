@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sn-stack
+description: ESnet SmartNIC sn-stack (esnet-smartnic-fw docker compose) as one pod pinned to an NRP U55C node
+type: application
+version: 0.1.0
+appVersion: "esnet-smartnic-fw@5c08736"

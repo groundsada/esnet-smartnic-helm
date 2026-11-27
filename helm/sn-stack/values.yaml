@@ -1,0 +1,55 @@
+# One release = one card. Two releases on the same card will fight over the PFs.
+node: node-2-11.sdsc.optiputer.net
+
+fpga:
+  # Card at 21:00 is on JTAG cable XFL1QYVIDV45 (the other card, c1:00, is XFL1KPDWO0QF).
+  # hw_server wants the USB serial with an extra trailing "A".
+  pcieDev: "0000:21:00"
+  jtagSerial: "XFL1QYVIDV45A"
+  board: au55c
+
+images:
+  fw: ghcr.io/groundsada/smartnic-nrp-images/esnet-smartnic-fw:hls_app-au55c-20261126-bar4m
+  labtools: ghcr.io/groundsada/smartnic-nrp-images/xilinx-labtools-docker:mfsada-dev
+  pullPolicy: IfNotPresent
+# Both GHCR packages are private. Create the secret before installing (see skill smartnic-on-nrp).
+imagePullSecrets:
+  - name: ghcr-pull
+
+# JTAG-load the .bit baked into the fw image (volatile: a power cycle reverts to flash).
+# Off by default: it replaces whatever is running on the card. Needs an explicit go-ahead.
+program:
+  enabled: false
+  force: false
+  # Reset the PCIe endpoint through the design's debug VIO (debug_nets.ltx). hls_app has no VIO
+  # ("No matching hw_vios"), and the script bails AFTER removing the PFs from the bus. With it off,
+  # program_card.sh uses its AMD path: always reload, then rescan the bus.
+  vioPcieReset: false
+
+# Write the .mcs to the card's QSPI user partition (persistent; survives power cycles).
+# Runs as a Job and scales the stack to 0 while it holds the JTAG cable. Turn off again afterwards.
+flash:
+  enabled: false
+
+# vfio: bind both PFs to vfio-pci and hold them open with vfio-unlock (compose profile
+#       smartnic-mgr-vfio-unlock); sn-cfg/regio work, DPDK can't open the PFs.
+# vfio-dpdk: bind to vfio-pci, no unlock; run DPDK in the fw container (it opens vfio itself).
+# none: unbind drivers and enable memory decode (compose profile smartnic-no-vfio).
+pfMode: vfio
+
+# sn-p4 server only makes sense for apps with a VitisNetP4 core (p4_only etc.), not hls_app.
+p4:
+  enabled: false
+
+dpdk:
+  enabled: true
+  hugepages1Gi: 4Gi
+
+# Leave empty to generate once and keep across upgrades.
+auth:
+  cfgToken: ""
+  p4Token: ""
+
+resources:
+  server: {cpu: "1", memory: 1Gi}
+  tools: {cpu: "4", memory: 4Gi}

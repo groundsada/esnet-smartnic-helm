@@ -1,0 +1,6 @@
+build/
+*.zip
+*.bit
+*.mcs
+.DS_Store
+kubevirt/sn-vm.password
