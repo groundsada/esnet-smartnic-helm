@@ -1,4 +1,4 @@
-# smartnic-nrp-helm
+# esnet-smartnic-helm
 
 The ESnet SmartNIC stack (`esnet-smartnic-fw`'s docker compose `sn-stack`) on an NRP (Nautilus)
 node with an AMD Alveo U55C, as a Helm chart. One release drives one card.
