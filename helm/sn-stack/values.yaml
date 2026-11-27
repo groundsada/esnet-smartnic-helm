@@ -2,14 +2,14 @@
 node: node-2-11.sdsc.optiputer.net
 
 fpga:
-  # Card at 21:00 is on JTAG cable XFL1QYVIDV45 (the other card, c1:00, is XFL1KPDWO0QF).
-  # hw_server wants the USB serial with an extra trailing "A".
-  pcieDev: "0000:21:00"
+  # JTAG cable XFL1QYVIDV45 is wired to the card at c1:00 (verified 2026-11-27; the other card,
+  # 21:00, is presumably XFL1KPDWO0QF). hw_server wants the USB serial with an extra trailing "A".
+  pcieDev: "0000:c1:00"
   jtagSerial: "XFL1QYVIDV45A"
   board: au55c
 
 images:
-  fw: ghcr.io/groundsada/smartnic-nrp-images/esnet-smartnic-fw:hls_app-au55c-20261126-bar4m
+  fw: ghcr.io/groundsada/smartnic-nrp-images/esnet-smartnic-fw:p4_only-au55c-2023.2-20261127
   labtools: ghcr.io/groundsada/smartnic-nrp-images/xilinx-labtools-docker:mfsada-dev
   pullPolicy: IfNotPresent
 # Both GHCR packages are private. Create the secret before installing (see skill smartnic-on-nrp).

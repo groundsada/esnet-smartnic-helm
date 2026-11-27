@@ -128,6 +128,8 @@ spec:
         env:
         {{- include "sn-stack.fwEnv" . | nindent 8 }}
         - {name: SN_P4_SERVER_DEVICES, value: "{{ $dev }}.0"}
+        # cfg and p4 share the pod's network namespace (separate containers in compose); both default to 8000
+        - {name: SN_P4_SERVER_PROMETHEUS_PORT, value: "8001"}
         - name: SN_P4_SERVER_AUTH_TOKENS
           valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: p4}}
         ports: [{name: p4, containerPort: 50050}]
@@ -145,11 +147,14 @@ spec:
         command: [sleep, infinity]
         env:
         {{- include "sn-stack.fwEnv" . | nindent 8 }}
-        - {name: SN_CFG_CLI_ADDRESS, value: localhost}
+        # the servers self-sign for the pod hostname (= pod name); TLS_INSECURE still checks the hostname
+        - name: SN_CFG_CLI_ADDRESS
+          valueFrom: {fieldRef: {fieldPath: metadata.name}}
         - {name: SN_CFG_CLI_TLS_INSECURE, value: "true"}
         - name: SN_CFG_CLI_AUTH_TOKEN
           valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: cfg}}
-        - {name: SN_P4_CLI_ADDRESS, value: localhost}
+        - name: SN_P4_CLI_ADDRESS
+          valueFrom: {fieldRef: {fieldPath: metadata.name}}
         - {name: SN_P4_CLI_TLS_INSECURE, value: "true"}
         - name: SN_P4_CLI_AUTH_TOKEN
           valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-auth, key: p4}}
