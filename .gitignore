@@ -4,3 +4,4 @@ build/
 *.mcs
 .DS_Store
 kubevirt/sn-vm.password
+captures/
